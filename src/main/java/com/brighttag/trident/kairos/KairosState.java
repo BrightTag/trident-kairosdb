@@ -13,7 +13,6 @@ import backtype.storm.task.IMetricsContext;
 import backtype.storm.tuple.Values;
 
 import com.google.common.base.Function;
-import com.google.common.base.Joiner;
 import com.google.common.base.Objects;
 import com.google.common.base.Strings;
 import com.google.common.collect.FluentIterable;
@@ -51,6 +50,7 @@ import static org.kairosdb.client.util.Preconditions.checkNotNullOrEmpty;
 
 public class KairosState<T> implements IBackingMap<T> {
 
+  @SuppressWarnings("rawtypes")
   private static final Map<StateType, KairosSerializer> DEFAULT_SERIALIZERS =
       ImmutableMap.<StateType, KairosSerializer>of(
 //        StateType.NON_TRANSACTIONAL, new TransactionalKairosSerializer(),
@@ -82,6 +82,7 @@ public class KairosState<T> implements IBackingMap<T> {
     private final Options<T> options;
     private final KairosSerializer<T> serializer;
 
+    @SuppressWarnings("unchecked")
     public Factory(StateType stateType, String host, Options<T> options) {
       this.stateType = stateType;
       this.host = host;
@@ -90,9 +91,10 @@ public class KairosState<T> implements IBackingMap<T> {
     }
 
     @Override
+    @SuppressWarnings({ "rawtypes", "unchecked" })
     public State makeState(Map conf, IMetricsContext metrics, int partitionIndex, int numPartitions) {
-      KairosState cachedMap = new KairosState<T>(new HttpClient(host, options.port), serializer, options.kairosWriteDelay);
-//      CachedMap cachedMap = new CachedMap(state, options.localCacheSize);
+      KairosState<T> state = new KairosState<T>(new HttpClient(host, options.port), serializer, options.kairosWriteDelay);
+      CachedMap cachedMap = new CachedMap(state, options.localCacheSize);
       MapState mapState;
       if (stateType == StateType.NON_TRANSACTIONAL) {
         mapState = NonTransactionalMap.build(cachedMap);
@@ -123,7 +125,7 @@ public class KairosState<T> implements IBackingMap<T> {
 
   @Override
   public List<T> multiGet(List<List<Object>> keys) {
-    System.out.println("GET KEYS " + keys);
+//    System.out.println("GET KEYS " + keys);
     // no keys means no date etc to query by
     if (keys.isEmpty()) {
       return ImmutableList.of();
@@ -138,23 +140,16 @@ public class KairosState<T> implements IBackingMap<T> {
         builder = QueryBuilder.getInstance().setStart(start).setEnd(end);
         queryMap.put(bucket, builder);
       }
-      builder.addMetric(toMetricName(key.subList(2, key.size())))
-          .addAggregator(new AggregatorImpl("max"));
+      builder.addMetric(key.get(2).toString())
+          .addAggregator(new AggregatorImpl("max"))
+          .addTags(toTags(key.subList(3, key.size())));
     }
     List<T> values = Lists.newArrayListWithExpectedSize(keys.size());
     try {
       for (QueryBuilder builder : queryMap.values()) {
-        System.out.println("QUERY " + builder.build());
-        try {
-          // KairosDB has a delay buffer for writes
-          // We must wait at least this long to avoid a race condition between READ and WRITE
-          Thread.sleep(kairosWriteDelay);
-        } catch (InterruptedException e) {
-          // TODO Auto-generated catch block
-          e.printStackTrace();
-        }
+        waitForWrite();
         QueryResponse response = client.query(builder);
-        System.out.println("RESPONSE " + toString(response));
+        System.out.println("QUERY " + builder.build() + "\nRESPONSE " + toString(response));
         for (Queries query : response.getQueries()) {
           for (Results result : query.getResults()) {
             if (!Strings.isNullOrEmpty(result.getName()) && !result.getDataPoints().isEmpty()) {
@@ -176,20 +171,46 @@ public class KairosState<T> implements IBackingMap<T> {
 
   @Override
   public void multiPut(List<List<Object>> keys, List<T> vals) {
-    System.out.println("PUT KEYS " + keys + " VALS " + vals);
+//    System.out.println("PUT KEYS " + keys + " VALS " + vals);
     MetricBuilder builder = MetricBuilder.getInstance();
     for (int i = 0; i < keys.size(); i++) {
       List<Object> k = keys.get(i);
-      Metric metric = builder.addMetric(toMetricName(k.subList(2, k.size())));
-      serializer.serialize(vals.get(i), metric, toDate(k.get(0)));
+      Metric metric = builder.addMetric(k.get(2).toString());
+      serializer.serialize(vals.get(i), metric, toDate(k.get(0)), toTags(k.subList(3, k.size())));
     }
     try {
        System.out.println("STORE " + builder.build());
       client.pushMetrics(builder);
+      waitForWrite();
     } catch (URISyntaxException e) {
       // TODO Auto-generated catch block
       e.printStackTrace();
     } catch (IOException e) {
+      // TODO Auto-generated catch block
+      e.printStackTrace();
+    }
+  }
+
+  private Map<String, String> toTags(List<Object> objs) {
+    Map<String, String> tags = Maps.newHashMap();
+    for (Object o : objs) {
+      if (o instanceof Map) {
+        @SuppressWarnings("unchecked")
+        Map<String, String> m = (Map<String, String>) o;
+        tags.putAll(m);
+      } else {
+        System.out.println("Ignoring non-map key: " + o);
+      }
+    }
+    return tags;
+  }
+
+  private void waitForWrite() {
+    try {
+      // KairosDB has a delay buffer for writes
+      // We must wait at least this long to avoid a race condition between READ and WRITE
+      Thread.sleep(kairosWriteDelay);
+    } catch (InterruptedException e) {
       // TODO Auto-generated catch block
       e.printStackTrace();
     }
@@ -217,7 +238,7 @@ public class KairosState<T> implements IBackingMap<T> {
   }
 
   private static interface KairosSerializer<T> extends Serializable {
-    void serialize(T obj, Metric m, Date timestamp);
+    void serialize(T obj, Metric m, Date timestamp, Map<String, String> tags);
     T deserialize(Results r);
   }
 
@@ -225,7 +246,8 @@ public class KairosState<T> implements IBackingMap<T> {
     private static final long serialVersionUID = 2284757678780545341L;
 
     @Override
-    public void serialize(OpaqueValue<Long> obj, Metric metric, Date timestamp) {
+    public void serialize(OpaqueValue<Long> obj, Metric metric, Date timestamp, Map<String, String> tags) {
+      metric.addTags(tags);
       metric.addTag("currTxid", String.valueOf(obj.getCurrTxid()));
       metric.addTag("prev", String.valueOf(obj.getPrev()));
       metric.addDataPoint(timestamp.getTime(), obj.getCurr());
@@ -259,12 +281,6 @@ public class KairosState<T> implements IBackingMap<T> {
       }
     };
 
-  }
-
-  private static final Joiner METRIC_NAME_JOINER = Joiner.on('.').skipNulls();
-
-  private static String toMetricName(List<Object> key) {
-    return METRIC_NAME_JOINER.join(key);
   }
 
   private static String toString(QueryResponse response) {
