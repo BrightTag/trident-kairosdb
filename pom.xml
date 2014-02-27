@@ -6,7 +6,7 @@
 
     <groupId>com.brighttag</groupId>
     <artifactId>trident-kairos</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <version>0.1.0</version>
     <packaging>jar</packaging>
 
     <name>trident-kairos</name>
@@ -37,7 +37,7 @@
         <dependency>
             <groupId>org.kairos</groupId>
             <artifactId>client</artifactId>
-            <version>1.1</version>
+            <version>1.0-bt-add_multiple_tags</version>
         </dependency>
 
         <dependency>
