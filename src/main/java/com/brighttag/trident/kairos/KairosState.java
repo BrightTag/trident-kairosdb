@@ -53,7 +53,7 @@ public class KairosState<T> implements IBackingMap<T> {
   @SuppressWarnings("rawtypes")
   private static final Map<StateType, KairosSerializer> DEFAULT_SERIALIZERS =
       ImmutableMap.<StateType, KairosSerializer>of(
-//        StateType.NON_TRANSACTIONAL, new TransactionalKairosSerializer(),
+        StateType.NON_TRANSACTIONAL, new NonTransactionalKairosSerializer(),
 //        StateType.TRANSACTIONAL, new TransactionalKairosSerializer(),
         StateType.OPAQUE, new OpaqueKairosSerializer());
 
@@ -67,11 +67,19 @@ public class KairosState<T> implements IBackingMap<T> {
   }
 
   public static StateFactory opaque(String host) {
-    return new Factory<OpaqueValue<Long>>(StateType.OPAQUE, host, new Options<OpaqueValue<Long>>());
+    return opaque(host, new Options<OpaqueValue<Long>>());
   }
 
   public static StateFactory opaque(String host, Options<OpaqueValue<Long>> options) {
     return new Factory<OpaqueValue<Long>>(StateType.OPAQUE, host, options);
+  }
+
+  public static StateFactory nonTransactional(String host) {
+    return nonTransactional(host, new Options<Long>());
+  }
+
+  public static StateFactory nonTransactional(String host, Options<Long> options) {
+    return new Factory<Long>(StateType.NON_TRANSACTIONAL, host, options);
   }
 
   public static class Factory<T> implements StateFactory {
@@ -271,6 +279,33 @@ public class KairosState<T> implements IBackingMap<T> {
         return Longs.compare(left.getValue(), right.getValue());
       }
     };
+
+    private static Ordering<String> NULLABLE_STRING_LONG_ORDER = new Ordering<String>() {
+      @Override
+      public int compare(@Nullable String l, @Nullable String r) {
+        if (l.equals("null")) { return -1; }
+        if (r.equals("null")) { return  1; }
+        return Longs.compare(Long.parseLong(l), Long.parseLong(r));
+      }
+    };
+
+  }
+
+  private static class NonTransactionalKairosSerializer implements KairosSerializer<Long> {
+    private static final long serialVersionUID = 2284757678780545341L;
+
+    @Override
+    public void serialize(Long obj, Metric metric, Date timestamp, Map<String, String> tags) {
+      metric.addTags(tags);
+      metric.addDataPoint(timestamp.getTime(), obj);
+    }
+
+    @Override
+    public Long deserialize(Results r) {
+      Map<String, List<String>> tags = r.getTags();
+      long transactionId = Long.parseLong(NULLABLE_STRING_LONG_ORDER.max(tags.get("currTxid")));
+      return transactionId;
+    }
 
     private static Ordering<String> NULLABLE_STRING_LONG_ORDER = new Ordering<String>() {
       @Override
