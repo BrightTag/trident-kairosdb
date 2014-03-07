@@ -313,9 +313,8 @@ public class KairosState<T> implements IBackingMap<T> {
 
     @Override
     public Long deserialize(Results r) {
-      Map<String, List<String>> tags = r.getTags();
-      long transactionId = Long.parseLong(NULLABLE_STRING_LONG_ORDER.max(tags.get("currTxid")));
-      return transactionId;
+      long curr = ((LongDataPoint) VALUE_ORDER.max(r.getDataPoints())).getValue();
+      return curr;
     }
 
   }
