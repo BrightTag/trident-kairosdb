@@ -38,6 +38,7 @@ import storm.trident.state.OpaqueValue;
 import storm.trident.state.State;
 import storm.trident.state.StateFactory;
 import storm.trident.state.StateType;
+import storm.trident.state.TransactionalValue;
 import storm.trident.state.map.CachedMap;
 import storm.trident.state.map.IBackingMap;
 import storm.trident.state.map.MapState;
@@ -54,7 +55,7 @@ public class KairosState<T> implements IBackingMap<T> {
   private static final Map<StateType, KairosSerializer> DEFAULT_SERIALIZERS =
       ImmutableMap.<StateType, KairosSerializer>of(
         StateType.NON_TRANSACTIONAL, new NonTransactionalKairosSerializer(),
-//        StateType.TRANSACTIONAL, new TransactionalKairosSerializer(),
+        StateType.TRANSACTIONAL, new TransactionalKairosSerializer(),
         StateType.OPAQUE, new OpaqueKairosSerializer());
 
   public static class Options<T> implements Serializable {
@@ -72,6 +73,14 @@ public class KairosState<T> implements IBackingMap<T> {
 
   public static StateFactory opaque(String host, Options<OpaqueValue<Long>> options) {
     return new Factory<OpaqueValue<Long>>(StateType.OPAQUE, host, options);
+  }
+
+  public static StateFactory transactional(String host) {
+    return transactional(host, new Options<TransactionalValue<Long>>());
+  }
+
+  public static StateFactory transactional(String host, Options<TransactionalValue<Long>> options) {
+    return new Factory<TransactionalValue<Long>>(StateType.OPAQUE, host, options);
   }
 
   public static StateFactory nonTransactional(String host) {
@@ -271,23 +280,25 @@ public class KairosState<T> implements IBackingMap<T> {
       return new OpaqueValue<Long>(transactionId, curr, prev);
     }
 
-    private static Ordering<DataPoint> VALUE_ORDER = new Ordering<DataPoint>() {
-      @Override
-      public int compare(DataPoint l, DataPoint r) {
-        LongDataPoint left = (LongDataPoint) l;
-        LongDataPoint right = (LongDataPoint) r;
-        return Longs.compare(left.getValue(), right.getValue());
-      }
-    };
+  }
 
-    private static Ordering<String> NULLABLE_STRING_LONG_ORDER = new Ordering<String>() {
-      @Override
-      public int compare(@Nullable String l, @Nullable String r) {
-        if (l.equals("null")) { return -1; }
-        if (r.equals("null")) { return  1; }
-        return Longs.compare(Long.parseLong(l), Long.parseLong(r));
-      }
-    };
+  private static class TransactionalKairosSerializer implements KairosSerializer<TransactionalValue<Long>> {
+    private static final long serialVersionUID = 2284757678780545341L;
+
+    @Override
+    public void serialize(TransactionalValue<Long> obj, Metric metric, Date timestamp, Map<String, String> tags) {
+      metric.addTags(tags);
+      metric.addTag("currTxid", String.valueOf(obj.getTxid()));
+      metric.addDataPoint(timestamp.getTime(), obj.getVal());
+    }
+
+    @Override
+    public TransactionalValue<Long> deserialize(Results r) {
+      Map<String, List<String>> tags = r.getTags();
+      long transactionId = Long.parseLong(NULLABLE_STRING_LONG_ORDER.max(tags.get("currTxid")));
+      long curr = ((LongDataPoint) VALUE_ORDER.max(r.getDataPoints())).getValue();
+      return new TransactionalValue<Long>(transactionId, curr);
+    }
 
   }
 
@@ -307,16 +318,25 @@ public class KairosState<T> implements IBackingMap<T> {
       return transactionId;
     }
 
-    private static Ordering<String> NULLABLE_STRING_LONG_ORDER = new Ordering<String>() {
-      @Override
-      public int compare(@Nullable String l, @Nullable String r) {
-        if (l.equals("null")) { return -1; }
-        if (r.equals("null")) { return  1; }
-        return Longs.compare(Long.parseLong(l), Long.parseLong(r));
-      }
-    };
-
   }
+
+  private static Ordering<DataPoint> VALUE_ORDER = new Ordering<DataPoint>() {
+    @Override
+    public int compare(DataPoint l, DataPoint r) {
+      LongDataPoint left = (LongDataPoint) l;
+      LongDataPoint right = (LongDataPoint) r;
+      return Longs.compare(left.getValue(), right.getValue());
+    }
+  };
+
+  private static Ordering<String> NULLABLE_STRING_LONG_ORDER = new Ordering<String>() {
+    @Override
+    public int compare(@Nullable String l, @Nullable String r) {
+      if (l.equals("null")) { return -1; }
+      if (r.equals("null")) { return  1; }
+      return Longs.compare(Long.parseLong(l), Long.parseLong(r));
+    }
+  };
 
   private static String toString(QueryResponse response) {
     return FluentIterable.from(response.getQueries()).transformAndConcat(new Function<Queries,List<String>>() {
