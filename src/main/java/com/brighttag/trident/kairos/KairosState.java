@@ -7,24 +7,22 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 
-import javax.annotation.Nullable;
-
 import backtype.storm.task.IMetricsContext;
 import backtype.storm.tuple.Values;
 
+import com.google.common.base.Charsets;
 import com.google.common.base.Function;
 import com.google.common.base.Objects;
 import com.google.common.base.Strings;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.common.collect.Ordering;
-import com.google.common.primitives.Longs;
 
 import org.kairosdb.client.HttpClient;
-import org.kairosdb.client.builder.Aggregator;
+import org.kairosdb.client.builder.CustomDataPoint;
 import org.kairosdb.client.builder.DataPoint;
 import org.kairosdb.client.builder.LongDataPoint;
 import org.kairosdb.client.builder.Metric;
@@ -34,6 +32,9 @@ import org.kairosdb.client.response.Queries;
 import org.kairosdb.client.response.QueryResponse;
 import org.kairosdb.client.response.Results;
 
+import storm.trident.state.JSONNonTransactionalSerializer;
+import storm.trident.state.JSONOpaqueSerializer;
+import storm.trident.state.JSONTransactionalSerializer;
 import storm.trident.state.OpaqueValue;
 import storm.trident.state.State;
 import storm.trident.state.StateFactory;
@@ -46,8 +47,6 @@ import storm.trident.state.map.NonTransactionalMap;
 import storm.trident.state.map.OpaqueMap;
 import storm.trident.state.map.SnapshottableMap;
 import storm.trident.state.map.TransactionalMap;
-
-import static org.kairosdb.client.util.Preconditions.checkNotNullOrEmpty;
 
 public class KairosState<T> implements IBackingMap<T> {
 
@@ -142,7 +141,6 @@ public class KairosState<T> implements IBackingMap<T> {
 
   @Override
   public List<T> multiGet(List<List<Object>> keys) {
-//    System.out.println("GET KEYS " + keys);
     // no keys means no date etc to query by
     if (keys.isEmpty()) {
       return ImmutableList.of();
@@ -158,7 +156,6 @@ public class KairosState<T> implements IBackingMap<T> {
         queryMap.put(bucket, builder);
       }
       builder.addMetric(key.get(2).toString())
-          .addAggregator(new AggregatorImpl("max"))
           .addTags(toTags(key.subList(3, key.size())));
     }
     List<T> values = Lists.newArrayListWithExpectedSize(keys.size());
@@ -188,7 +185,6 @@ public class KairosState<T> implements IBackingMap<T> {
 
   @Override
   public void multiPut(List<List<Object>> keys, List<T> vals) {
-//    System.out.println("PUT KEYS " + keys + " VALS " + vals);
     MetricBuilder builder = MetricBuilder.getInstance();
     for (int i = 0; i < keys.size(); i++) {
       List<Object> k = keys.get(i);
@@ -233,27 +229,6 @@ public class KairosState<T> implements IBackingMap<T> {
     }
   }
 
-  private static class AggregatorImpl implements Aggregator {
-    private final String name;
-
-    private AggregatorImpl(String name)
-    {
-      this.name = checkNotNullOrEmpty(name);
-    }
-
-    @Override
-    public String getName()
-    {
-      return name;
-    }
-
-    @Override
-    public String toJson()
-    {
-      return "\"name\": \"" + name + "\"";
-    }
-  }
-
   private static interface KairosSerializer<T> extends Serializable {
     void serialize(T obj, Metric m, Date timestamp, Map<String, String> tags);
     T deserialize(Results r);
@@ -262,22 +237,21 @@ public class KairosState<T> implements IBackingMap<T> {
   private static class OpaqueKairosSerializer implements KairosSerializer<OpaqueValue<Long>> {
     private static final long serialVersionUID = 2284757678780545341L;
 
+    private static final JSONOpaqueSerializer SERIALIZER = new JSONOpaqueSerializer();
+
     @Override
     public void serialize(OpaqueValue<Long> obj, Metric metric, Date timestamp, Map<String, String> tags) {
+      String value = new String(SERIALIZER.serialize(obj), Charsets.UTF_8);
       metric.addTags(tags);
-      metric.addTag("currTxid", String.valueOf(obj.getCurrTxid()));
-      metric.addTag("prev", String.valueOf(obj.getPrev()));
-      metric.addDataPoint(timestamp.getTime(), obj.getCurr());
+      metric.addDataPoint(timestamp.getTime(), value, "storm_opaque");
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public OpaqueValue<Long> deserialize(Results r) {
-      Map<String, List<String>> tags = r.getTags();
-      long transactionId = Long.parseLong(NULLABLE_STRING_LONG_ORDER.max(tags.get("currTxid")));
-      String s = NULLABLE_STRING_LONG_ORDER.max(tags.get("prev"));
-      Long prev = s.equals("null") ? null : Long.parseLong(s);
-      long curr = ((LongDataPoint) VALUE_ORDER.max(r.getDataPoints())).getValue();
-      return new OpaqueValue<Long>(transactionId, curr, prev);
+      // TODO comment - why is it guaranteed to only be a single element in the response?
+      String value = ((CustomDataPoint<String>) Iterables.getOnlyElement(r.getDataPoints())).getValue();
+      return SERIALIZER.deserialize(value.getBytes(Charsets.UTF_8));
     }
 
   }
@@ -285,19 +259,21 @@ public class KairosState<T> implements IBackingMap<T> {
   private static class TransactionalKairosSerializer implements KairosSerializer<TransactionalValue<Long>> {
     private static final long serialVersionUID = 2284757678780545341L;
 
+    private static final JSONTransactionalSerializer SERIALIZER = new JSONTransactionalSerializer();
+
     @Override
     public void serialize(TransactionalValue<Long> obj, Metric metric, Date timestamp, Map<String, String> tags) {
+      String value = new String(SERIALIZER.serialize(obj), Charsets.UTF_8);
       metric.addTags(tags);
-      metric.addTag("currTxid", String.valueOf(obj.getTxid()));
-      metric.addDataPoint(timestamp.getTime(), obj.getVal());
+      metric.addDataPoint(timestamp.getTime(), value, "storm_transactional");
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public TransactionalValue<Long> deserialize(Results r) {
-      Map<String, List<String>> tags = r.getTags();
-      long transactionId = Long.parseLong(NULLABLE_STRING_LONG_ORDER.max(tags.get("currTxid")));
-      long curr = ((LongDataPoint) VALUE_ORDER.max(r.getDataPoints())).getValue();
-      return new TransactionalValue<Long>(transactionId, curr);
+      // TODO comment - why is it guaranteed to only be a single element in the response?
+      String value = ((CustomDataPoint<String>) Iterables.getOnlyElement(r.getDataPoints())).getValue();
+      return SERIALIZER.deserialize(value.getBytes(Charsets.UTF_8));
     }
 
   }
@@ -305,37 +281,24 @@ public class KairosState<T> implements IBackingMap<T> {
   private static class NonTransactionalKairosSerializer implements KairosSerializer<Long> {
     private static final long serialVersionUID = 2284757678780545341L;
 
+    private static final JSONNonTransactionalSerializer SERIALIZER = new JSONNonTransactionalSerializer();
+
     @Override
     public void serialize(Long obj, Metric metric, Date timestamp, Map<String, String> tags) {
+      String value = new String(SERIALIZER.serialize(obj), Charsets.UTF_8);
       metric.addTags(tags);
-      metric.addDataPoint(timestamp.getTime(), obj);
+      metric.addDataPoint(timestamp.getTime(), value, "storm_nontransactional");
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public Long deserialize(Results r) {
-      long curr = ((LongDataPoint) VALUE_ORDER.max(r.getDataPoints())).getValue();
-      return curr;
+      // TODO comment - why is it guaranteed to only be a single element in the response?
+      String value = ((CustomDataPoint<String>) Iterables.getOnlyElement(r.getDataPoints())).getValue();
+      return (Long)SERIALIZER.deserialize(value.getBytes(Charsets.UTF_8));
     }
 
   }
-
-  private static Ordering<DataPoint> VALUE_ORDER = new Ordering<DataPoint>() {
-    @Override
-    public int compare(DataPoint l, DataPoint r) {
-      LongDataPoint left = (LongDataPoint) l;
-      LongDataPoint right = (LongDataPoint) r;
-      return Longs.compare(left.getValue(), right.getValue());
-    }
-  };
-
-  private static Ordering<String> NULLABLE_STRING_LONG_ORDER = new Ordering<String>() {
-    @Override
-    public int compare(@Nullable String l, @Nullable String r) {
-      if (l.equals("null")) { return -1; }
-      if (r.equals("null")) { return  1; }
-      return Longs.compare(Long.parseLong(l), Long.parseLong(r));
-    }
-  };
 
   private static String toString(QueryResponse response) {
     return FluentIterable.from(response.getQueries()).transformAndConcat(new Function<Queries,List<String>>() {
