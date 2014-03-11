@@ -143,8 +143,27 @@ public class KairosState<T> implements IBackingMap<T> {
     this.kairosWriteDelay = kairosWriteDelay;
   }
 
+  /**
+   * Parses the string form of {@code obj} as a signed decimal long representing a date.
+   * Throws an exception on failure.
+   *
+   * @return the Date representation of {@code obj}
+   */
   private static Date toDate(Object obj) {
-    return new Date(Long.parseLong(obj.toString()));
+    return toDate(obj, false);
+  }
+
+  /**
+   * Parses the string form of {@code obj} as a signed decimal long representing a date.
+   * If {@code obj} is {@code exclusive} (i.e., {@code exclusive is true), subtracts one
+   * millisecond to transform from an exclusive date to an inclusive date.
+   * Throws an exception on failure.
+   *
+   * @param exclusive whether {@obj} is exclusive
+   * @return the Date representation of {@code obj}
+   */
+  private static Date toDate(Object obj, boolean exclusive) {
+    return new Date(Long.parseLong(obj.toString()) - (exclusive ? 1 : 0));
   }
 
   @Override
@@ -156,7 +175,7 @@ public class KairosState<T> implements IBackingMap<T> {
     Map<List<Date>, QueryBuilder> queryMap = Maps.newHashMap();
     for (List<Object> key : keys) {
       Date start = toDate(key.get(0));
-      Date end = toDate(key.get(1));
+      Date end = toDate(key.get(1), true);
       List<Date> bucket = ImmutableList.of(start, end);
       QueryBuilder builder = queryMap.get(bucket);
       if (builder == null) {
@@ -257,7 +276,7 @@ public class KairosState<T> implements IBackingMap<T> {
     @Override
     @SuppressWarnings("unchecked")
     public OpaqueValue<Long> deserialize(Results r) {
-      // TODO comment - why is it guaranteed to only be a single element in the response?
+      // Guaranteed to be a single element because we query for a single bucket
       String value = ((CustomDataPoint<String>) Iterables.getOnlyElement(r.getDataPoints())).getValue();
       return SERIALIZER.deserialize(value.getBytes(Charsets.UTF_8));
     }
