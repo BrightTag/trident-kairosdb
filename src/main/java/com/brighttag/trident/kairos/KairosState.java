@@ -1,3 +1,4 @@
+// Copyright 2014 BrightTag, Inc. All rights reserved.
 package com.brighttag.trident.kairos;
 
 import java.io.IOException;
@@ -24,7 +25,6 @@ import com.google.common.collect.Maps;
 import org.kairosdb.client.HttpClient;
 import org.kairosdb.client.builder.CustomDataPoint;
 import org.kairosdb.client.builder.DataPoint;
-import org.kairosdb.client.builder.LongDataPoint;
 import org.kairosdb.client.builder.Metric;
 import org.kairosdb.client.builder.MetricBuilder;
 import org.kairosdb.client.builder.QueryBuilder;
@@ -48,6 +48,14 @@ import storm.trident.state.map.OpaqueMap;
 import storm.trident.state.map.SnapshottableMap;
 import storm.trident.state.map.TransactionalMap;
 
+/**
+ * Trident state implementation for KairosDB. It supports non-transactional,
+ * transactional, and opaque state types.
+ *
+ * @author codyaray
+ * @since 2/18/2014
+ * @param <T> type of the value; one of 'Long', 'TransactionalValue<Long>', or 'OpaqueValue<Long>'
+ */
 public class KairosState<T> implements IBackingMap<T> {
 
   @SuppressWarnings("rawtypes")
@@ -331,7 +339,7 @@ public class KairosState<T> implements IBackingMap<T> {
     return FluentIterable.from(datapoints).transform(new Function<DataPoint,String>() {
       @Override
       public String apply(DataPoint input) {
-        LongDataPoint datapoint = (LongDataPoint) input;
+        CustomDataPoint<?> datapoint = (CustomDataPoint<?>) input;
         return "[" + datapoint.getTimestamp() + "," + datapoint.getValue() + "]";
       }
     }).toList().toString();
