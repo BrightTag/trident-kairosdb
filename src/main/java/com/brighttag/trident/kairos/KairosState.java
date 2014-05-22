@@ -195,11 +195,13 @@ public class KairosState<T> implements IBackingMap<T> {
   private final Serializer<T> serializer;
   private final HttpClient client;
   private final int kairosWriteDelay;
+  private final String type;
 
   public KairosState(HttpClient client, Serializer<T> serializer, int kairosWriteDelay) {
     this.client = client;
     this.serializer = serializer;
     this.kairosWriteDelay = kairosWriteDelay;
+    this.type = toType(serializer);
   }
 
   /**
@@ -273,8 +275,9 @@ public class KairosState<T> implements IBackingMap<T> {
     MetricBuilder builder = MetricBuilder.getInstance();
     for (int i = 0; i < keys.size(); i++) {
       List<Object> k = keys.get(i);
-      Metric metric = builder.addMetric(k.get(2).toString(), toType(serializer))
-          .addTags(toTags(k.subList(3, k.size())));
+      String name = k.get(2).toString();
+      Map<String, String> tags = toTags(k.subList(3, k.size()));
+      Metric metric = builder.addMetric(name, type).addTags(tags);
       serialize(metric, toDate(k.get(0)), vals.get(i));
     }
     try {
@@ -320,9 +323,9 @@ public class KairosState<T> implements IBackingMap<T> {
 
   @SuppressWarnings("rawtypes")
   private static final Map<Class<? extends Serializer>, String> KAIROS_TYPES = ImmutableMap.of(
-      JSONOpaqueSerializer.class, "storm_opaque",
-      JSONTransactionalSerializer.class, "storm_transactional",
-      JSONNonTransactionalSerializer.class, "storm_nontransactional");
+      JSONOpaqueSerializer.class, "trident_opaque",
+      JSONTransactionalSerializer.class, "trident_transactional",
+      JSONNonTransactionalSerializer.class, "trident_nontransactional");
 
   private static String toType(Serializer<?> serializer) {
     if (KAIROS_TYPES.containsKey(serializer.getClass())) {
