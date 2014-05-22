@@ -1,4 +1,18 @@
-// Copyright 2014 BrightTag, Inc. All rights reserved.
+/*
+ * Copyright 2014 BrightTag, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.brighttag.trident.kairos;
 
 import java.io.IOException;
@@ -12,10 +26,9 @@ import backtype.storm.task.IMetricsContext;
 import backtype.storm.tuple.Values;
 
 import com.google.common.base.Charsets;
-import com.google.common.base.Function;
 import com.google.common.base.Objects;
 import com.google.common.base.Strings;
-import com.google.common.collect.FluentIterable;
+import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
@@ -25,7 +38,6 @@ import com.google.common.collect.Maps;
 import org.apache.commons.lang.NotImplementedException;
 import org.kairosdb.client.HttpClient;
 import org.kairosdb.client.builder.CustomDataPoint;
-import org.kairosdb.client.builder.DataPoint;
 import org.kairosdb.client.builder.Metric;
 import org.kairosdb.client.builder.MetricBuilder;
 import org.kairosdb.client.builder.QueryBuilder;
@@ -54,17 +66,17 @@ import storm.trident.state.map.TransactionalMap;
  * Trident state implementation for KairosDB. It supports non-transactional,
  * transactional, and opaque state types.
  *
- * Requires use of KairosDB built with support for "storm_opaque", "storm_transactional",
- * and "storm_nontransactional" custom types.
+ * Requires use of KairosDB built with support for "trident_opaque", "trident_transactional",
+ * and "trident_nontransactional" custom types.
  *
- * Only {@code GroupedStream}s are supported, keyed by {@code (bucketStart, bucketEnd, name, tags)}.
- * For example, assuming your spout emits fields {@code (bucketStart, bucketEnd, name, value, tags)},
+ * Only {@code GroupedStream}s are supported, keyed by {@code (timeStart, timeEnd, metricName, tags)}.
+ * For example, assuming your spout emits fields {@code (timeStart, timeEnd, metricName, value, tags)},
  * you might setup an aggregation topology as follows. (This is the only currently tested setup).
  *
  * <pre>{@code
  *   TridentTopology topology = new TridentTopology();
  *   Stream stream = topology.newStream("spout1", spout)
- *       .groupBy(new Fields("bucketStart", "bucketEnd", "metricName", "tags"))
+ *       .groupBy(new Fields("timeStart", "timeEnd", "metricName", "tags"))
  *       .persistentAggregate(KairosState.opaque(kairosHost), new Fields("value"), new Sum(), new Fields("count"))
  *   return topology.build();
  * }</pre>
@@ -78,17 +90,17 @@ public class KairosState<T> implements IBackingMap<T> {
   @SuppressWarnings("rawtypes")
   private static final Map<StateType, Serializer> DEFAULT_SERIALIZERS =
       ImmutableMap.<StateType, Serializer>of(
-        StateType.NON_TRANSACTIONAL, new JSONTransactionalSerializer(),
+        StateType.NON_TRANSACTIONAL, new JSONNonTransactionalSerializer(),
         StateType.TRANSACTIONAL, new JSONTransactionalSerializer(),
         StateType.OPAQUE, new JSONOpaqueSerializer());
 
   public static class Options<T> implements Serializable {
     private static final long serialVersionUID = -4631189563874399265L;
-    public int localCacheSize = 5000;
     public String globalKey = "$__GLOBAL_KEY__$";
+    public int localCacheSize = 5000;
     public int port = 8080;
-    public Serializer<T> serializer;
     public int kairosWriteDelay = 2 * 1000; // 2 seconds = 2 x kairos default (1s for v0.9.1-0.9.2)
+    public Serializer<T> serializer;
   }
 
   /**
@@ -196,29 +208,37 @@ public class KairosState<T> implements IBackingMap<T> {
    */
   @Override
   public List<T> multiGet(List<List<Object>> keys) {
-    // no keys means no date etc to query by
-    if (keys.isEmpty()) {
+    // time range and metric name required to query by
+    if (keys.size() < 3) {
       return ImmutableList.of();
     }
+    Map<List<Date>, QueryBuilder> queries = groupQueriesByTimeRange(keys);
+    return getValuesFromKairos(keys, queries);
+  }
+
+  private static Map<List<Date>, QueryBuilder> groupQueriesByTimeRange(List<List<Object>> keys) {
     Map<List<Date>, QueryBuilder> queryMap = Maps.newHashMap();
     for (List<Object> key : keys) {
       Date start = toDate(key.get(0));
       Date end = toDate(key.get(1), true);
-      List<Date> bucket = ImmutableList.of(start, end);
-      QueryBuilder builder = queryMap.get(bucket);
+      List<Date> timeRange = ImmutableList.of(start, end);
+      QueryBuilder builder = queryMap.get(timeRange);
       if (builder == null) {
         builder = QueryBuilder.getInstance().setStart(start).setEnd(end);
-        queryMap.put(bucket, builder);
+        queryMap.put(timeRange, builder);
       }
       builder.addMetric(key.get(2).toString())
           .addTags(toTags(key.subList(3, key.size())));
     }
+    return queryMap;
+  }
+
+  private List<T> getValuesFromKairos(List<List<Object>> keys, Map<List<Date>, QueryBuilder> queryMap) {
     List<T> values = Lists.newArrayListWithExpectedSize(keys.size());
     try {
       for (QueryBuilder builder : queryMap.values()) {
-        waitForWrite();
+        waitForWrite(); // TODO: replace writeDelay in KairosDB with write-through cache
         QueryResponse response = client.query(builder);
-        System.out.println("QUERY " + builder.build() + "\nRESPONSE " + toString(response));
         for (Queries query : response.getQueries()) {
           for (Results result : query.getResults()) {
             if (!Strings.isNullOrEmpty(result.getName()) && !result.getDataPoints().isEmpty()) {
@@ -230,11 +250,10 @@ public class KairosState<T> implements IBackingMap<T> {
         }
       }
     } catch (URISyntaxException e) {
-      e.printStackTrace();
+      throw Throwables.propagate(e);
     } catch (IOException e) {
-      e.printStackTrace();
+      throw Throwables.propagate(e);
     }
-
     return values;
   }
 
@@ -244,7 +263,6 @@ public class KairosState<T> implements IBackingMap<T> {
    *
    * @param keys list of metric key fields in this order:
    *   (start_date [long], exclusive_end_date [long], name [string], tags [map<string, string>]...)
-   * @return list of values corresponding to the {@code key} with the same index in {@code keys}
    */
   @Override
   public void multiPut(List<List<Object>> keys, List<T> vals) {
@@ -255,15 +273,12 @@ public class KairosState<T> implements IBackingMap<T> {
       serialize(metric, toDate(k.get(0)), vals.get(i));
     }
     try {
-       System.out.println("STORE " + builder.build());
       client.pushMetrics(builder);
       waitForWrite();
     } catch (URISyntaxException e) {
-      // TODO Auto-generated catch block
-      e.printStackTrace();
+      throw Throwables.propagate(e);
     } catch (IOException e) {
-      // TODO Auto-generated catch block
-      e.printStackTrace();
+      throw Throwables.propagate(e);
     }
   }
 
@@ -275,8 +290,7 @@ public class KairosState<T> implements IBackingMap<T> {
     try {
       Thread.sleep(kairosWriteDelay);
     } catch (InterruptedException e) {
-      // TODO Auto-generated catch block
-      e.printStackTrace();
+      throw Throwables.propagate(e);
     }
   }
 
@@ -319,8 +333,6 @@ public class KairosState<T> implements IBackingMap<T> {
         @SuppressWarnings("unchecked")
         Map<String, String> m = (Map<String, String>) o;
         tags.putAll(m);
-      } else {
-        System.out.println("Ignoring non-map key: " + o);
       }
     }
     return tags;
@@ -347,43 +359,6 @@ public class KairosState<T> implements IBackingMap<T> {
    */
   private static Date toDate(Object obj, boolean exclusive) {
     return new Date(Long.parseLong(obj.toString()) - (exclusive ? 1 : 0));
-  }
-
-  private static String toString(QueryResponse response) {
-    return FluentIterable.from(response.getQueries()).transformAndConcat(new Function<Queries,List<String>>() {
-      @Override
-      public List<String> apply(Queries input) {
-        return KairosState.toString(input);
-      }
-    }).toList().toString();
-  }
-
-  private static List<String> toString(Queries queries) {
-    return FluentIterable.from(queries.getResults()).transform(new Function<Results,String>() {
-      @Override
-      public String apply(Results input) {
-        return KairosState.toString(input);
-      }
-    }).toList();
-  }
-
-  private static String toString(Results results) {
-    return Objects.toStringHelper(results)
-        .add("name", results.getName())
-        .add("datapoints", toString(results.getDataPoints()))
-        .add("tags", results.getTags())
-        .add("groups", results.getGroupResults())
-        .toString();
-  }
-
-  private static String toString(List<DataPoint> datapoints) {
-    return FluentIterable.from(datapoints).transform(new Function<DataPoint,String>() {
-      @Override
-      public String apply(DataPoint input) {
-        CustomDataPoint<?> datapoint = (CustomDataPoint<?>) input;
-        return "[" + datapoint.getTimestamp() + "," + datapoint.getValue() + "]";
-      }
-    }).toList().toString();
   }
 
 }
