@@ -5,8 +5,27 @@ transactional, and opaque state types.
 
 ## Install
 
-This library is not yet hosted in Maven Central. Until such time, you can build and install
-it into your local Maven repository for linking against.
+Because this is still beta software, you'll have to build and install from the `develop` branch
+of the [kairosdb-client](https://github.com/BrightTag/kairosdb-client/tree/develop).
+
+1. Clone the BT fork (til the pull request is merged): `git clone https://github.com/BrightTag/kairosdb-client.git`
+2. Checkout the develop branch: `cd kairosdb-client && git checkout develop`
+3. Build and install to local Maven: `mvn clean install`
+
+Now continue with the normal installation.
+
+1. Build and install trident-kairosdb into your local Maven repository.
+
+    $ cd trident-kairosdb
+    $ mvn clean install
+
+2. Add the Maven coordinates to your Storm topology project.
+
+    <dependency>
+        <groupId>com.brighttag</groupId>
+        <artifactId>trident-kairosdb</artifactId>
+        <version>0.1.0</version>
+    </dependency>
 
 You must also install the [Trident plugin in KairosDB](https://github.com/BrightTag/trident-kairosdb-plugin).
 

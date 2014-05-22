@@ -17,6 +17,7 @@ package com.brighttag.trident.kairos;
 
 import java.io.IOException;
 import java.io.Serializable;
+import java.net.MalformedURLException;
 import java.net.URISyntaxException;
 import java.util.Date;
 import java.util.List;
@@ -37,7 +38,6 @@ import com.google.common.collect.Maps;
 
 import org.apache.commons.lang.NotImplementedException;
 import org.kairosdb.client.HttpClient;
-import org.kairosdb.client.builder.CustomDataPoint;
 import org.kairosdb.client.builder.Metric;
 import org.kairosdb.client.builder.MetricBuilder;
 import org.kairosdb.client.builder.QueryBuilder;
@@ -89,10 +89,10 @@ public class KairosState<T> implements IBackingMap<T> {
 
   @SuppressWarnings("rawtypes")
   private static final Map<StateType, Serializer> DEFAULT_SERIALIZERS =
-      ImmutableMap.<StateType, Serializer>of(
-        StateType.NON_TRANSACTIONAL, new JSONNonTransactionalSerializer(),
-        StateType.TRANSACTIONAL, new JSONTransactionalSerializer(),
-        StateType.OPAQUE, new JSONOpaqueSerializer());
+      ImmutableMap.of(
+          StateType.NON_TRANSACTIONAL, new JSONNonTransactionalSerializer(),
+          StateType.TRANSACTIONAL, new JSONTransactionalSerializer(),
+          StateType.OPAQUE, new JSONOpaqueSerializer());
 
   public static class Options<T> implements Serializable {
     private static final long serialVersionUID = -4631189563874399265L;
@@ -152,25 +152,29 @@ public class KairosState<T> implements IBackingMap<T> {
     private static final long serialVersionUID = -6288582170089084573L;
 
     private final StateType stateType;
-    private final String host;
+    private final String url;
     private final Options<T> options;
     private final Serializer<T> serializer;
 
     @SuppressWarnings("unchecked")
     public Factory(StateType stateType, String host, Options<T> options) {
       this.stateType = stateType;
-      this.host = host;
       this.options = options;
+      this.url = String.format("%s:%d", host, options.port);
       this.serializer = Objects.firstNonNull(options.serializer, DEFAULT_SERIALIZERS.get(stateType));
     }
 
     @Override
     @SuppressWarnings("rawtypes")
     public State makeState(Map conf, IMetricsContext metrics, int partitionIndex, int numPartitions) {
-      KairosState<T> state = new KairosState<T>(new HttpClient(host, options.port), serializer, options.kairosWriteDelay);
-      CachedMap<T> cachedMap = new CachedMap<T>(state, options.localCacheSize);
-      MapState<T> mapState = buildMapState(cachedMap);
-      return new SnapshottableMap<T>(mapState, new Values(options.globalKey));
+      try {
+        KairosState<T> state = new KairosState<T>(new HttpClient(url), serializer, options.kairosWriteDelay);
+        CachedMap<T> cachedMap = new CachedMap<T>(state, options.localCacheSize);
+        MapState<T> mapState = buildMapState(cachedMap);
+        return new SnapshottableMap<T>(mapState, new Values(options.globalKey));
+      } catch (MalformedURLException e) {
+        throw Throwables.propagate(e);
+      }
     }
 
     @SuppressWarnings({ "rawtypes", "unchecked" })
@@ -269,7 +273,8 @@ public class KairosState<T> implements IBackingMap<T> {
     MetricBuilder builder = MetricBuilder.getInstance();
     for (int i = 0; i < keys.size(); i++) {
       List<Object> k = keys.get(i);
-      Metric metric = builder.addMetric(k.get(2).toString()).addTags(toTags(k.subList(3, k.size())));
+      Metric metric = builder.addMetric(k.get(2).toString(), toType(serializer))
+          .addTags(toTags(k.subList(3, k.size())));
       serialize(metric, toDate(k.get(0)), vals.get(i));
     }
     try {
@@ -300,7 +305,7 @@ public class KairosState<T> implements IBackingMap<T> {
    */
   private void serialize(Metric metric, Date timestamp, T obj) {
     String value = new String(serializer.serialize(obj), Charsets.UTF_8);
-    metric.addDataPoint(timestamp.getTime(), value, toType(serializer));
+    metric.addDataPoint(timestamp.getTime(), value);
   }
 
   /**
@@ -309,7 +314,7 @@ public class KairosState<T> implements IBackingMap<T> {
   private T deserialize(Results r) {
     // Guaranteed to be a single element because we query for a single bucket
     @SuppressWarnings("unchecked")
-    String value = ((CustomDataPoint<String>) Iterables.getOnlyElement(r.getDataPoints())).getValue();
+    String value = (String) Iterables.getOnlyElement(r.getDataPoints()).getValue();
     return serializer.deserialize(value.getBytes(Charsets.UTF_8));
   }
 
