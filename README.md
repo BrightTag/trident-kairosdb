@@ -6,9 +6,9 @@ transactional, and opaque state types.
 ## Install
 
 Because this is still beta software, you'll have to build and install from the `develop` branch
-of the [kairosdb-client](https://github.com/BrightTag/kairosdb-client/tree/develop).
+of the [kairosdb-client](https://github.com/proofpoint/kairosdb-client/tree/develop).
 
-1. Clone the BT fork (til the pull request is merged): `git clone https://github.com/BrightTag/kairosdb-client.git`
+1. Clone the kairosdb-client: `git clone https://github.com/proofpoint/kairosdb-client.git`
 2. Checkout the develop branch: `cd kairosdb-client && git checkout develop`
 3. Build and install to local Maven: `mvn clean install`
 
